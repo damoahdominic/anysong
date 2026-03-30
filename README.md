@@ -1,9 +1,9 @@
 # 🎵 anysong
 
-Download any song as a properly named MP3. One command.
+Download any song as a properly named MP3. One command. Single binary.
 
 ```bash
-anysong "Lil Wayne Lollipop"
+anysong download "Lil Wayne Lollipop"
 # → ~/music/lollipop_by_lil_wayne.mp3
 ```
 
@@ -15,32 +15,44 @@ anysong "Lil Wayne Lollipop"
 
 ## Install
 
+### From Source (requires Go 1.22+)
+
 ```bash
 git clone https://github.com/damoahdominic/anysong.git
 cd anysong
-pip install -r requirements.txt
+go build -o anysong .
+sudo mv anysong /usr/local/bin/
+```
 
-# Optional: install deno for best yt-dlp YouTube support
-curl -fsSL https://deno.land/install.sh | sh
+### Prerequisites
+
+- **yt-dlp** — `pip install yt-dlp` or `brew install yt-dlp`
+- **ffmpeg** — `apt install ffmpeg` or `brew install ffmpeg`
+
+### Docker
+
+```bash
+docker build -t anysong .
+docker run --rm -v ~/music:/music anysong download "Lil Wayne Lollipop" --dir /music
 ```
 
 ## Usage
 
 ```bash
 # Download a song
-./anysong download "Lil Wayne Lollipop"
+anysong download "Lil Wayne Lollipop"
 
 # Download to specific directory
-./anysong download "Wild Thoughts Rihanna" --dir ~/Music
+anysong download "Wild Thoughts Rihanna" --dir ~/Music
 
 # Browse results before downloading
-./anysong download "Bohemian Rhapsody" --pick
+anysong download "Bohemian Rhapsody" --pick
 
 # Search without downloading
-./anysong search "Drake" --limit 10
+anysong search "Drake" --limit 10
 
 # Batch download from a text file
-./anysong batch playlist.txt --dir ~/Music
+anysong batch playlist.txt --dir ~/Music
 ```
 
 ### Batch File Format
@@ -61,7 +73,7 @@ mkdir -p ~/.anysong
 yt-dlp --cookies-from-browser chrome --cookies ~/.anysong/cookies.txt "https://youtube.com"
 ```
 
-anysong will pick them up automatically. Without cookies, it falls back to SoundCloud.
+anysong will pick them up automatically and also checks ytc.mba.sh for shared cookies. Without cookies, it falls back to SoundCloud.
 
 ## Output
 
@@ -77,10 +89,10 @@ Songs are saved to `~/music/` by default with clean filenames:
 
 ## Tech
 
+- **Go** — Single static binary, ~8MB, runs everywhere
 - **Deezer API** — Free, no auth. Provides accurate metadata (title, artist, album, duration)
 - **yt-dlp** — Downloads audio from YouTube and SoundCloud
-- **Rich** — Pretty CLI output
-- **Typer** — CLI framework
+- **Cobra** — CLI framework
 
 ## License
 

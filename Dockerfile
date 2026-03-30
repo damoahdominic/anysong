@@ -1,25 +1,19 @@
-FROM python:3.12-slim
+FROM golang:1.22-alpine AS builder
 
-# Install ffmpeg + deno
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg curl unzip && \
-    curl -fsSL https://deno.land/install.sh | sh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o anysong .
 
-ENV PATH="/root/.deno/bin:$PATH"
+FROM alpine:3.20
 
-# Install Python deps
-RUN pip install --no-cache-dir yt-dlp typer rich
+RUN apk add --no-cache ffmpeg python3 py3-pip curl && \
+    pip3 install --break-system-packages yt-dlp
 
-# Pre-cache yt-dlp EJS components for YouTube
-RUN yt-dlp --remote-components ejs:github --simulate "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>/dev/null || true
+COPY --from=builder /build/anysong /usr/local/bin/anysong
 
-# Copy app
-WORKDIR /app
-COPY anysong.py .
-
-# Output dir
 RUN mkdir -p /music
 
-ENTRYPOINT ["python", "anysong.py"]
+ENTRYPOINT ["anysong"]
 CMD ["--help"]

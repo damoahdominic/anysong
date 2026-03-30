@@ -1,9 +1,7 @@
-__pycache__/
-*.pyc
-venv/
-.venv/
 *.mp3
 *.wav
 *.flac
 .DS_Store
 .env
+anysong
+!py_backup/
