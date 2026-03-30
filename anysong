@@ -1,0 +1,9 @@
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -d "$DIR/../clawdj/venv" ]; then
+    source "$DIR/../clawdj/venv/bin/activate"
+elif [ -d "$DIR/venv" ]; then
+    source "$DIR/venv/bin/activate"
+fi
+export PATH="$HOME/.deno/bin:$PATH"
+python "$DIR/anysong.py" "$@"
