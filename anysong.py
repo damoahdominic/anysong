@@ -12,10 +12,12 @@ import os
 import sys
 import re
 import json
+import time
 import subprocess
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -27,6 +29,9 @@ console = Console()
 
 DEFAULT_DIR = Path.home() / "music"
 DEEZER_API = "https://api.deezer.com"
+YTC_URL = "https://ytc.mba.sh"
+COOKIES_DIR = Path.home() / ".anysong"
+COOKIES_FILE = COOKIES_DIR / "cookies.txt"
 
 # Download sources in priority order
 SOURCES = [
@@ -36,7 +41,6 @@ SOURCES = [
 
 
 def _get_env() -> dict:
-    """Get environment with deno + venv paths."""
     env = os.environ.copy()
     deno_path = os.path.expanduser("~/.deno/bin")
     if os.path.isdir(deno_path):
@@ -45,7 +49,6 @@ def _get_env() -> dict:
 
 
 def _find_ytdlp() -> str:
-    """Find yt-dlp binary."""
     venv_ytdlp = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
     if os.path.isfile(venv_ytdlp):
         return venv_ytdlp
@@ -53,7 +56,6 @@ def _find_ytdlp() -> str:
 
 
 def _sanitize_filename(name: str) -> str:
-    """Make a string safe for filenames."""
     name = re.sub(r'[<>:"/\\|?*]', '', name)
     name = re.sub(r'\s+', '_', name.strip())
     name = name.lower()
@@ -61,11 +63,50 @@ def _sanitize_filename(name: str) -> str:
     return name
 
 
+def _ensure_cookies() -> Optional[str]:
+    """Ensure we have YouTube cookies.
+    
+    Priority:
+    1. Fresh local cookies (~/.anysong/cookies.txt, < 24h old)
+    2. Fetch from ytc.mba.sh central cookie service
+    3. Stale local cookies (better than nothing)
+    4. None
+    """
+    COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Check if local cookies are fresh (< 24h)
+    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 100:
+        age_hours = (time.time() - COOKIES_FILE.stat().st_mtime) / 3600
+        if age_hours < 24:
+            return str(COOKIES_FILE)
+
+    # Try fetching from central service
+    try:
+        req = urllib.request.Request(f"{YTC_URL}/health", headers={"User-Agent": "anysong/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            health = json.loads(resp.read().decode())
+            if health.get("cookies_available"):
+                req2 = urllib.request.Request(f"{YTC_URL}/cookies.txt", headers={"User-Agent": "anysong/1.0"})
+                with urllib.request.urlopen(req2, timeout=10) as resp2:
+                    if resp2.status == 200:
+                        content = resp2.read()
+                        if len(content) > 100:
+                            COOKIES_FILE.write_bytes(content)
+                            console.print("  [dim]🍪 Cookies refreshed from ytc.mba.sh[/dim]")
+                            return str(COOKIES_FILE)
+    except Exception:
+        pass
+
+    # Fall back to stale local cookies
+    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 100:
+        return str(COOKIES_FILE)
+
+    return None
+
+
 def _deezer_search(query: str, limit: int = 5) -> list:
-    """Search Deezer for tracks. Free API, no auth needed."""
     encoded = urllib.parse.quote(query)
     url = f"{DEEZER_API}/search?q={encoded}&limit={limit}"
-
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "anysong/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -83,33 +124,12 @@ def _format_duration(seconds: int) -> str:
 
 
 def _build_filename(artist: str, title: str) -> str:
-    """Build a clean filename: title_by_artist.mp3"""
     clean_title = _sanitize_filename(title)
     clean_artist = _sanitize_filename(artist)
     return f"{clean_title}_by_{clean_artist}.mp3"
 
 
-def _ytmusic_search(query: str, limit: int = 1) -> list:
-    """Search YouTube Music API for video IDs (no auth needed)."""
-    try:
-        from ytmusicapi import YTMusic
-        yt = YTMusic()
-        results = yt.search(query, filter="songs", limit=limit)
-        return [
-            {
-                "title": r.get("title", ""),
-                "artist": r.get("artists", [{}])[0].get("name", ""),
-                "videoId": r.get("videoId", ""),
-                "duration": r.get("duration", ""),
-            }
-            for r in results if r.get("videoId")
-        ]
-    except Exception:
-        return []
-
-
 def _try_download(search_query: str, output_path: str, source_template: str, source_name: str) -> bool:
-    """Try downloading from a specific source."""
     ytdlp = _find_ytdlp()
     env = _get_env()
 
@@ -124,21 +144,19 @@ def _try_download(search_query: str, output_path: str, source_template: str, sou
         "--print", "after_move:filepath",
     ]
 
-    # Only add duration filter for search-based sources
     if "search" in source_template:
         cmd.extend(["--match-filter", "duration<=600"])
 
     cmd.append(source_template.format(query=search_query))
 
-    # YouTube cookies support
+    # Auto-fetch cookies for YouTube
     if source_name == "youtube":
-        cookies_path = os.path.expanduser("~/.anysong/cookies.txt")
-        if os.path.isfile(cookies_path):
+        cookies_path = _ensure_cookies()
+        if cookies_path:
             cmd.extend(["--cookies", cookies_path])
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-
         if result.returncode != 0:
             return False
 
@@ -162,14 +180,13 @@ def _try_download(search_query: str, output_path: str, source_template: str, sou
 
 
 def _try_deezer_preview(preview_url: str, output_path: str) -> bool:
-    """Download 30-second preview from Deezer as last resort."""
     if not preview_url:
         return False
     try:
         req = urllib.request.Request(preview_url, headers={"User-Agent": "anysong/1.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read()
-            if len(data) < 10000:  # Too small to be valid
+            if len(data) < 10000:
                 return False
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             with open(output_path, "wb") as f:
@@ -180,10 +197,6 @@ def _try_deezer_preview(preview_url: str, output_path: str) -> bool:
 
 
 def _download_song(yt_query: str, output_path: str, simple_query: str = "", preview_url: str = "") -> tuple:
-    """Try downloading from multiple sources with fallback.
-    
-    Returns (success: bool, source: str, quality: str)
-    """
     if not simple_query:
         simple_query = yt_query
 
@@ -192,16 +205,14 @@ def _download_song(yt_query: str, output_path: str, simple_query: str = "", prev
         q = yt_query if source_name == "youtube" else simple_query
         success = _try_download(q, output_path, template, source_name)
         if success:
-            # Check file size to detect short clips
             size = os.path.getsize(output_path)
-            if size < 100_000:  # Less than 100KB is probably a clip
+            if size < 100_000:
                 console.print(f"  [dim]{source_name}: got a short clip, trying next...[/dim]")
                 os.remove(output_path)
                 continue
             return (True, source_name, "full")
         console.print(f"  [dim]{source_name}: failed, trying next...[/dim]")
 
-    # Last resort: Deezer 30-second preview
     if preview_url:
         console.print(f"  [dim]Trying deezer preview (30s)...[/dim]")
         if _try_deezer_preview(preview_url, output_path):
@@ -223,7 +234,6 @@ def download(
 
     console.print(Panel(f"🎵 [bold]anysong[/bold] — {query}"))
 
-    # Step 1: Search Deezer for clean metadata
     with console.status("[blue]Looking up metadata..."):
         results = _deezer_search(query)
 
@@ -242,7 +252,6 @@ def download(
             console.print(f"\n[bold red]✗ Could not download: {query}[/bold red]")
         return
 
-    # Step 2: Pick track
     if pick and len(results) > 1:
         table = Table(title="Pick a track")
         table.add_column("#", style="dim", width=3)
@@ -280,7 +289,6 @@ def download(
         console.print(f" — [yellow]{album}[/yellow]", end="")
     console.print(f" [dim]({_format_duration(duration)})[/dim]")
 
-    # Step 3: Build filename + download
     filename = _build_filename(artist, title)
     output_path = str(output_dir / filename)
 
@@ -301,10 +309,8 @@ def download(
         console.print(f"\n[bold green]✓[/bold green] {output_path} ({size_mb:.1f} MB){quality_note} [dim]via {source}[/dim]")
     else:
         console.print(f"\n[bold red]✗ Could not download: {title} by {artist}[/bold red]")
-        console.print("[dim]YouTube requires cookies from this server. Fix:[/dim]")
-        console.print("[dim]  1. On a machine with Chrome: yt-dlp --cookies-from-browser chrome --cookies cookies.txt 'https://youtube.com'[/dim]")
-        console.print("[dim]  2. Copy to server: scp cookies.txt cbot@server:~/.anysong/cookies.txt[/dim]")
-        console.print("[dim]  3. Or use --preview-ok for 30s Deezer previews[/dim]")
+        console.print("[dim]No cookies available. Upload cookies to ytc.mba.sh or provide your own:[/dim]")
+        console.print("[dim]  anysong setup-cookies[/dim]")
 
 
 @app.command()
@@ -406,30 +412,39 @@ def batch(
 
 @app.command()
 def setup_cookies():
-    """Interactive guide to set up YouTube cookies."""
-    console.print(Panel("[bold]YouTube Cookie Setup[/bold]"))
-    console.print()
-    console.print("YouTube blocks downloads from servers without cookies.")
-    console.print("To fix this, export cookies from a browser where you're logged into YouTube.\n")
-    console.print("[bold]Option 1: From this machine (if you have a browser)[/bold]")
-    console.print("  yt-dlp --cookies-from-browser chrome --cookies ~/.anysong/cookies.txt 'https://youtube.com'\n")
-    console.print("[bold]Option 2: From your laptop/desktop[/bold]")
-    console.print("  1. Install yt-dlp: pip install yt-dlp")
-    console.print("  2. Export: yt-dlp --cookies-from-browser chrome --cookies cookies.txt 'https://youtube.com'")
-    console.print("  3. Copy: scp cookies.txt cbot@server:~/.anysong/cookies.txt\n")
-    console.print("[bold]Option 3: Manual Firefox export[/bold]")
-    console.print("  1. Install 'cookies.txt' browser extension")
-    console.print("  2. Go to youtube.com, click the extension, export")
-    console.print("  3. Save as ~/.anysong/cookies.txt\n")
+    """Set up YouTube cookies (local or upload to ytc.mba.sh)."""
+    console.print(Panel("[bold]🍪 YouTube Cookie Setup[/bold]"))
 
-    cookies_path = os.path.expanduser("~/.anysong/cookies.txt")
-    if os.path.isfile(cookies_path):
-        size = os.path.getsize(cookies_path)
-        console.print(f"[green]✓ Cookies file found:[/green] {cookies_path} ({size} bytes)")
+    console.print("\nanysong automatically fetches cookies from [cyan]ytc.mba.sh[/cyan].")
+    console.print("If that fails, it uses local cookies from ~/.anysong/cookies.txt\n")
+
+    # Check central service
+    try:
+        req = urllib.request.Request(f"{YTC_URL}/health", headers={"User-Agent": "anysong/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            health = json.loads(resp.read().decode())
+            if health.get("cookies_available"):
+                age = health.get("cookies_age_hours", 0)
+                console.print(f"[green]✓ Central cookies available[/green] (age: {age:.0f}h)")
+            else:
+                console.print("[yellow]⚠ No cookies on central server yet[/yellow]")
+    except Exception:
+        console.print("[red]✗ Could not reach ytc.mba.sh[/red]")
+
+    # Check local
+    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 100:
+        age = (time.time() - COOKIES_FILE.stat().st_mtime) / 3600
+        console.print(f"[green]✓ Local cookies found[/green] ({COOKIES_FILE.stat().st_size} bytes, {age:.0f}h old)")
     else:
-        console.print(f"[red]✗ No cookies file at:[/red] {cookies_path}")
-        os.makedirs(os.path.expanduser("~/.anysong"), exist_ok=True)
-        console.print(f"[dim]Created ~/.anysong/ directory[/dim]")
+        console.print(f"[dim]No local cookies at {COOKIES_FILE}[/dim]")
+
+    console.print("\n[bold]To add cookies:[/bold]")
+    console.print("  1. On a machine with Chrome + YouTube logged in:")
+    console.print("     [cyan]yt-dlp --cookies-from-browser chrome --cookies cookies.txt 'https://youtube.com'[/cyan]")
+    console.print("\n  2. Upload to central server (so everyone benefits):")
+    console.print(f"     [cyan]scp cookies.txt cbot@server:~/ytc/cookies.txt[/cyan]")
+    console.print("\n  3. Or keep local only:")
+    console.print(f"     [cyan]cp cookies.txt ~/.anysong/cookies.txt[/cyan]")
 
 
 if __name__ == "__main__":
