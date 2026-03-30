@@ -142,6 +142,7 @@ def _try_download(search_query: str, output_path: str, source_template: str, sou
         "--no-playlist",
         "--output", output_path.replace(".mp3", ".%(ext)s"),
         "--print", "after_move:filepath",
+        "--remote-components", "ejs:github",
     ]
 
     if "search" in source_template:
@@ -157,7 +158,7 @@ def _try_download(search_query: str, output_path: str, source_template: str, sou
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-        if result.returncode != 0:
+        if result.returncode not in (0, 101):  # 101 = max downloads reached
             return False
 
         if os.path.isfile(output_path):
