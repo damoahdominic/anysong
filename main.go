@@ -301,6 +301,7 @@ func tryDownload(searchQuery, outputPath, sourceTemplate, sourceName string) boo
 		"--no-playlist",
 		"--output", outTemplate,
 		"--print", "after_move:filepath",
+		"--remote-components", "ejs:github",
 	}
 
 	if strings.Contains(sourceTemplate, "search") {
