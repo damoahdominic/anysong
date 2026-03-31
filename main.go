@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -122,7 +123,29 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(downloadCmd, searchCmd, batchCmd, cookiesCmd)
+	var playDir string
+	var playPreviewOK bool
+	playCmd := &cobra.Command{
+		Use:   "play [query]",
+		Short: "Download and immediately play a song",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			query := args[0]
+			dir := playDir
+			if dir == "" {
+				dir = defaultDir
+			}
+			os.MkdirAll(dir, 0755)
+			path := downloadAndReturn(query, dir, false, playPreviewOK)
+			if path != "" {
+				openWithPlayer(path)
+			}
+		},
+	}
+	playCmd.Flags().StringVarP(&playDir, "dir", "d", "", "Output directory (default ~/music)")
+	playCmd.Flags().BoolVar(&playPreviewOK, "preview-ok", false, "Accept 30s Deezer preview as fallback")
+
+	rootCmd.AddCommand(downloadCmd, searchCmd, batchCmd, cookiesCmd, playCmd)
 
 	// Allow bare `anysong "query"` as shortcut for download
 	rootCmd.Run = func(cmd *cobra.Command, args []string) {
@@ -413,7 +436,8 @@ func doDownload(ytQuery, outputPath, simpleQuery, previewURL string) downloadRes
 
 // --- Commands ---
 
-func downloadSong(query, dir string, pick, previewOK bool) {
+// downloadAndReturn does the download and returns the file path (or "" on failure)
+func downloadAndReturn(query, dir string, pick, previewOK bool) string {
 	fmt.Printf("\n╭─ 🎵 anysong — %s\n", query)
 
 	results := deezerSearch(query, 5)
@@ -428,10 +452,10 @@ func downloadSong(query, dir string, pick, previewOK bool) {
 			info, _ := os.Stat(outputPath)
 			sizeMB := float64(info.Size()) / (1024 * 1024)
 			fmt.Printf("\n\033[32m✓\033[0m %s (%.1f MB) via %s\n", outputPath, sizeMB, result.source)
-		} else {
-			fmt.Printf("\n\033[31m✗ Could not download: %s\033[0m\n", query)
+			return outputPath
 		}
-		return
+		fmt.Printf("\n\033[31m✗ Could not download: %s\033[0m\n", query)
+		return ""
 	}
 
 	track := results[0]
@@ -478,7 +502,7 @@ func downloadSong(query, dir string, pick, previewOK bool) {
 		info, _ := os.Stat(outputPath)
 		sizeMB := float64(info.Size()) / (1024 * 1024)
 		fmt.Printf("\033[33mAlready have it:\033[0m %s (%.1f MB)\n", outputPath, sizeMB)
-		return
+		return outputPath
 	}
 
 	ytQuery := fmt.Sprintf("%s %s official audio", artist, title)
@@ -494,9 +518,32 @@ func downloadSong(query, dir string, pick, previewOK bool) {
 			qualityNote = fmt.Sprintf(" \033[33m(%s)\033[0m", result.quality)
 		}
 		fmt.Printf("\n\033[32m✓\033[0m %s (%.1f MB)%s via %s\n", outputPath, sizeMB, qualityNote, result.source)
-	} else {
-		fmt.Printf("\n\033[31m✗ Could not download: %s by %s\033[0m\n", title, artist)
-		fmt.Println("\033[2mNo cookies available. Run: anysong setup-cookies\033[0m")
+		return outputPath
+	}
+
+	fmt.Printf("\n\033[31m✗ Could not download: %s by %s\033[0m\n", title, artist)
+	fmt.Println("\033[2mNo cookies available. Run: anysong setup-cookies\033[0m")
+	return ""
+}
+
+func downloadSong(query, dir string, pick, previewOK bool) {
+	downloadAndReturn(query, dir, pick, previewOK)
+}
+
+// openWithPlayer opens a file with the OS default music player
+func openWithPlayer(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	default: // linux, freebsd, etc.
+		cmd = exec.Command("xdg-open", path)
+	}
+	fmt.Printf("\n\033[35m▶ Playing...\033[0m %s\n", filepath.Base(path))
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("\033[31m✗ Could not open player: %v\033[0m\n", err)
 	}
 }
 
